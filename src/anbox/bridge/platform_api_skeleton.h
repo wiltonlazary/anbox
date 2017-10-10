@@ -18,6 +18,7 @@
 #ifndef ANBOX_BRIDGE_PLATFORM_SERVER_H_
 #define ANBOX_BRIDGE_PLATFORM_SERVER_H_
 
+#include <functional>
 #include <memory>
 
 namespace google {
@@ -39,7 +40,7 @@ class ApplicationListUpdateEvent;
 }  // namespace bridge
 }  // namespace protobuf
 namespace platform {
-class Policy;
+class BasePlatform;
 } // namespace platform
 namespace rpc {
 class PendingCallCache;
@@ -55,7 +56,7 @@ class PlatformApiSkeleton {
  public:
   PlatformApiSkeleton(
       const std::shared_ptr<rpc::PendingCallCache> &pending_calls,
-      const std::shared_ptr<platform::Policy> &platform_policy,
+      const std::shared_ptr<platform::BasePlatform> &platform,
       const std::shared_ptr<wm::Manager> &window_manager,
       const std::shared_ptr<application::Database> &app_db);
   virtual ~PlatformApiSkeleton();
@@ -78,7 +79,7 @@ class PlatformApiSkeleton {
 
  private:
   std::shared_ptr<rpc::PendingCallCache> pending_calls_;
-  std::shared_ptr<platform::Policy> platform_policy_;
+  std::shared_ptr<platform::BasePlatform> platform_;
   std::shared_ptr<wm::Manager> window_manager_;
   std::shared_ptr<application::Database> app_db_;
   std::function<void()> boot_finished_handler_;

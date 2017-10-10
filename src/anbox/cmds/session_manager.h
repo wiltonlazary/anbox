@@ -30,21 +30,28 @@
 #include "anbox/graphics/rect.h"
 
 namespace anbox {
+namespace bridge {
+class AndroidApiStub;
+} // namespace bridge
+namespace container {
+class Client;
+}  // namespace container
 namespace cmds {
 class SessionManager : public cli::CommandWithFlagsAndAction {
  public:
-  typedef std::function<core::dbus::Bus::Ptr()> BusFactory;
-
-  static BusFactory session_bus_factory();
-
-  SessionManager(const BusFactory& bus_factory = session_bus_factory());
+  SessionManager();
 
  private:
-  BusFactory bus_factory_;
+  void launch_appmgr_if_needed(const std::shared_ptr<bridge::AndroidApiStub> &android_api_stub);
+
+  std::shared_ptr<container::Client> container_;
   std::string desktop_file_hint_;
   graphics::GLRendererServer::Config::Driver gles_driver_;
   bool single_window_ = false;
   graphics::Rect window_size_;
+  bool standalone_ = false;
+  bool experimental_ = false;
+  bool use_system_dbus_ = false;
 };
 }  // namespace cmds
 }  // namespace anbox

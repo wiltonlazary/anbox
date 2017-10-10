@@ -1,5 +1,11 @@
 name: anbox
-version: 1-dev
+version: 3
+version-script: |
+  if [ "$SNAPCRAFT_GRADE" = "stable" ]; then
+    echo $SNAPCRAFT_PROJECT_VERSION
+  else
+    echo $SNAPCRAFT_PROJECT_VERSION-$(git rev-parse --short HEAD)
+  fi
 summary: Android in a Box
 description: |
   Runtime for Android applications which runs a full Android system
@@ -8,6 +14,19 @@ description: |
 confinement: devmode
 grade: devel
 
+slots:
+  # Depending on in which environment we're running we either need
+  # to use the system or session DBus so we also need to have one
+  # slot for each.
+  dbus-session:
+    interface: dbus
+    bus: system
+    name: org.anbox
+  dbus-system:
+    interface: dbus
+    bus: system
+    name: org.anbox
+
 apps:
   anbox:
     command: bin/anbox-wrapper.sh
@@ -15,17 +34,53 @@ apps:
     command: bin/container-manager.sh start
     stop-command: bin/container-manager.sh stop
     daemon: simple
+  collect-bug-info:
+    command: bin/collect-bug-info.sh
 
 parts:
   android-images:
     plugin: dump
+    # This needs to be any directory but not the root one as if we use
+    # it we get superious permissions errors with the copied .git tree
+    source: data
     build-packages:
       - wget
     install: |
-      # FIXME: downloading with a source: field doesn't work as snapcraft
-      # expects the downloaded file to be an archive it can extract.
-      wget http://build.anbox.io/android-images/2017/04/12/android_1_amd64.img
-      mv android_1_amd64.img $SNAPCRAFT_PART_INSTALL/android.img
+      LOCAL_IMAGE=$SNAPCRAFT_PART_INSTALL/../../../android-images/android.img
+
+      if [ -f $LOCAL_IMAGE ]; then
+
+        echo "Using local image $LOCAL_IMAGE"
+        cp $LOCAL_IMAGE $SNAPCRAFT_PART_INSTALL/android.img
+
+      else
+
+        IMAGE_PATH=
+        IMAGE_NAME=
+        ARCH=$(uname -m)
+
+        case "$ARCH" in
+          x86_64)
+            IMAGE_PATH="2017/07/13"
+            IMAGE_NAME="android_3_amd64.img"
+            ;;
+          arm*)
+            IMAGE_PATH="2017/06/12"
+            IMAGE_NAME="android_1_armhf.img"
+            ;;
+          *)
+            echo "ERROR: Unknown architecture $ARCH"
+            exit 1
+            ;;
+        esac
+
+        # FIXME: downloading with a source: field doesn't work as snapcraft
+        # expects the downloaded file to be an archive it can extract.
+        echo "Downloading image..."
+        wget http://build.anbox.io/android-images/$IMAGE_PATH/$IMAGE_NAME
+        mv $IMAGE_NAME $SNAPCRAFT_PART_INSTALL/android.img
+
+      fi
     prime:
       - android.img
   anbox-common:
@@ -35,10 +90,12 @@ parts:
       snap-wrapper.sh: bin/anbox-wrapper.sh
       container-manager.sh: bin/container-manager.sh
       anbox-bridge.sh: bin/anbox-bridge.sh
+      collect-bug-info.sh: bin/collect-bug-info.sh
     prime:
       - bin/anbox-bridge.sh
       - bin/anbox-wrapper.sh
       - bin/container-manager.sh
+      - bin/collect-bug-info.sh
   apparmor:
     plugin: nil
     stage-packages:
@@ -75,6 +132,12 @@ parts:
       - lib/liblxc.so.1
       - lib/liblxc.so.1.2.0
       - libexec/lxc/lxc-monitord
+      - bin/lxc-start
+      - bin/lxc-stop
+      - bin/lxc-info
+      - bin/lxc-attach
+      - bin/lxc-ls
+      - bin/lxc-top
   anbox:
     plugin: cmake
     after:
@@ -84,6 +147,7 @@ parts:
       # FIXME: Anbox currently has some paths with hard coded prefixes. Once
       # that is fixed we can avoid using a prefix here.
       - -DCMAKE_INSTALL_PREFIX:PATH=/usr
+      - -DANBOX_VERSION=$SNAPCRAFT_PROJECT_VERSION
     build-packages:
       - build-essential
       - cmake
@@ -111,6 +175,7 @@ parts:
       - libprotobuf-dev
       - libproperties-cpp-dev
       - libsdl2-dev
+      - libsdl2-image-dev
       - pkg-config
       - protobuf-compiler
     stage-packages:
@@ -123,4 +188,5 @@ parts:
       make test
     prime:
       - usr/bin/anbox
+      - usr/share/anbox
       - usr/lib/*-linux-*/

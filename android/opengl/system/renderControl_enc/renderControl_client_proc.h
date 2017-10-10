@@ -6,7 +6,6 @@
 
 
 #include "renderControl_types.h"
-
 #ifndef renderControl_APIENTRY
 #define renderControl_APIENTRY 
 #endif

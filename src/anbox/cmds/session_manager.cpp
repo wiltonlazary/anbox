@@ -27,12 +27,17 @@
 #include "anbox/bridge/android_api_stub.h"
 #include "anbox/bridge/platform_api_skeleton.h"
 #include "anbox/bridge/platform_message_processor.h"
+#include "anbox/graphics/gl_renderer_server.h"
+
+namespace {
+std::istream& operator>>(std::istream& in, anbox::graphics::GLRendererServer::Config::Driver& driver);
+}
+
 #include "anbox/cmds/session_manager.h"
 #include "anbox/common/dispatcher.h"
-#include "anbox/config.h"
+#include "anbox/system_configuration.h"
 #include "anbox/container/client.h"
 #include "anbox/dbus/skeleton/service.h"
-#include "anbox/graphics/gl_renderer_server.h"
 #include "anbox/input/manager.h"
 #include "anbox/logger.h"
 #include "anbox/network/published_socket_connector.h"
@@ -40,7 +45,7 @@
 #include "anbox/rpc/channel.h"
 #include "anbox/rpc/connection_creator.h"
 #include "anbox/runtime.h"
-#include "anbox/ubuntu/platform_policy.h"
+#include "anbox/platform/base_platform.h"
 #include "anbox/wm/multi_window_manager.h"
 #include "anbox/wm/single_window_manager.h"
 
@@ -55,6 +60,9 @@
 namespace fs = boost::filesystem;
 
 namespace {
+constexpr const char *default_appmgr_package{"org.anbox.appmgr"};
+constexpr const char *default_appmgr_component{"org.anbox.appmgr.AppViewActivity"};
+const boost::posix_time::milliseconds default_appmgr_startup_delay{50};
 const anbox::graphics::Rect default_single_window_size{0, 0, 1024, 768};
 
 class NullConnectionCreator : public anbox::network::ConnectionCreator<
@@ -80,16 +88,22 @@ std::istream& operator>>(std::istream& in, anbox::graphics::GLRendererServer::Co
 }
 }
 
-anbox::cmds::SessionManager::BusFactory anbox::cmds::SessionManager::session_bus_factory() {
-  return []() {
-    return std::make_shared<core::dbus::Bus>(core::dbus::WellKnownBus::session);
-  };
+void anbox::cmds::SessionManager::launch_appmgr_if_needed(const std::shared_ptr<bridge::AndroidApiStub> &android_api_stub) {
+  if (!single_window_)
+    return;
+
+  android::Intent launch_intent;
+  launch_intent.package = default_appmgr_package;
+  launch_intent.component = default_appmgr_component;
+  // As this will only be executed in single window mode we don't have
+  // to specify and launch bounds.
+  android_api_stub->launch(launch_intent, graphics::Rect::Invalid, wm::Stack::Id::Default);
 }
 
-anbox::cmds::SessionManager::SessionManager(const BusFactory &bus_factory)
+anbox::cmds::SessionManager::SessionManager()
     : CommandWithFlagsAndAction{cli::Name{"session-manager"}, cli::Usage{"session-manager"},
                                 cli::Description{"Run the the anbox session manager"}},
-      bus_factory_(bus_factory),
+      gles_driver_(graphics::GLRendererServer::Config::Driver::Host),
       window_size_(default_single_window_size) {
   // Just for the purpose to allow QtMir (or unity8) to find this on our
   // /proc/*/cmdline
@@ -106,6 +120,15 @@ anbox::cmds::SessionManager::SessionManager(const BusFactory &bus_factory)
   flag(cli::make_flag(cli::Name{"window-size"},
                       cli::Description{"Size of the window in single window mode, e.g. --window-size=1024,768"},
                       window_size_));
+  flag(cli::make_flag(cli::Name{"standalone"},
+                      cli::Description{"Prevents the Container Manager from starting the default container (Experimental)"},
+                      standalone_));
+  flag(cli::make_flag(cli::Name{"experimental"},
+                      cli::Description{"Allows users to use experimental features"},
+                      experimental_));
+  flag(cli::make_flag(cli::Name{"use-system-dbus"},
+                      cli::Description{"Use system instead of session DBus"},
+                      use_system_dbus_));
 
   action([this](const cli::Command::Context &) {
     auto trap = core::posix::trap_signals_for_process(
@@ -115,16 +138,14 @@ anbox::cmds::SessionManager::SessionManager(const BusFactory &bus_factory)
       trap->stop();
     });
 
-    if (!fs::exists("/dev/binder") || !fs::exists("/dev/ashmem")) {
-      ERROR("Failed to start as either binder or ashmem kernel drivers are not loaded");
+    if (standalone_ && !experimental_) {
+      ERROR("Experimental features selected, but --experimental flag not set");
       return EXIT_FAILURE;
     }
 
-    // If we're running with the properietary nvidia driver we always
-    // use the host EGL driver as our translation doesn't work here.
-    if (fs::exists("/dev/nvidiactl")) {
-      INFO("Detected properietary nvidia driver; forcing use of the host EGL driver.");
-      gles_driver_ = graphics::GLRendererServer::Config::Driver::Host;
+    if (!fs::exists("/dev/binder") || !fs::exists("/dev/ashmem")) {
+      ERROR("Failed to start as either binder or ashmem kernel drivers are not loaded");
+      return EXIT_FAILURE;
     }
 
     utils::ensure_paths({
@@ -135,18 +156,49 @@ anbox::cmds::SessionManager::SessionManager(const BusFactory &bus_factory)
     auto rt = Runtime::create();
     auto dispatcher = anbox::common::create_dispatcher_for_runtime(rt);
 
-    container::Client container(rt);
-    container.register_terminate_handler([&]() {
-      WARNING("Lost connection to container manager, terminating.");
-      trap->stop();
-    });
+    if (!standalone_) {
+      container_ = std::make_shared<container::Client>(rt);
+      container_->register_terminate_handler([&]() {
+	  WARNING("Lost connection to container manager, terminating.");
+	  trap->stop();
+	});
+    }
 
     auto input_manager = std::make_shared<input::Manager>(rt);
 
     auto android_api_stub = std::make_shared<bridge::AndroidApiStub>();
 
+    auto display_frame = graphics::Rect::Invalid;
+    if (single_window_)
+      display_frame = window_size_;
+
+    auto platform = platform::create(utils::get_env_value("ANBOX_PLATFORM", "sdl"),
+                                     input_manager,
+                                     display_frame,
+                                     single_window_);
+    if (!platform)
+      return EXIT_FAILURE;
+
+    auto app_db = std::make_shared<application::Database>();
+
+    std::shared_ptr<wm::Manager> window_manager;
+    bool using_single_window = false;
+    if (platform->supports_multi_window() && !single_window_)
+      window_manager = std::make_shared<wm::MultiWindowManager>(platform, android_api_stub, app_db);
+    else {
+      window_manager = std::make_shared<wm::SingleWindowManager>(platform, display_frame, app_db);
+      using_single_window = true;
+    }
+
+    auto gl_server = std::make_shared<graphics::GLRendererServer>(
+          graphics::GLRendererServer::Config{gles_driver_, single_window_}, window_manager);
+
+    platform->set_window_manager(window_manager);
+    platform->set_renderer(gl_server->renderer());
+    window_manager->setup();
+
     auto app_manager = std::static_pointer_cast<application::Manager>(android_api_stub);
-    if (!single_window_) {
+    if (!using_single_window) {
       // When we're not running single window mode we need to restrict ourself to
       // only launch applications in freeform mode as otherwise the window tracking
       // doesn't work.
@@ -154,31 +206,7 @@ anbox::cmds::SessionManager::SessionManager(const BusFactory &bus_factory)
             android_api_stub, wm::Stack::Id::Freeform);
     }
 
-    auto display_frame = graphics::Rect::Invalid;
-    if (single_window_)
-      display_frame = window_size_;
-
-    auto policy = std::make_shared<ubuntu::PlatformPolicy>(input_manager, display_frame, single_window_);
-    // FIXME this needs to be removed and solved differently behind the scenes
-    registerDisplayManager(policy);
-
-    auto app_db = std::make_shared<application::Database>();
-
-    std::shared_ptr<wm::Manager> window_manager;
-    if (single_window_)
-      window_manager = std::make_shared<wm::SingleWindowManager>(policy, display_frame, app_db);
-    else
-      window_manager = std::make_shared<wm::MultiWindowManager>(policy, android_api_stub, app_db);
-
-    auto gl_server = std::make_shared<graphics::GLRendererServer>(
-          graphics::GLRendererServer::Config{gles_driver_, single_window_}, window_manager);
-
-    policy->set_window_manager(window_manager);
-    policy->set_renderer(gl_server->renderer());
-
-    window_manager->setup();
-
-    auto audio_server = std::make_shared<audio::Server>(rt, policy);
+    auto audio_server = std::make_shared<audio::Server>(rt, platform);
 
     const auto socket_path = SystemConfiguration::instance().socket_dir();
 
@@ -188,6 +216,8 @@ anbox::cmds::SessionManager::SessionManager(const BusFactory &bus_factory)
         std::make_shared<network::PublishedSocketConnector>(
             utils::string_format("%s/qemu_pipe", socket_path), rt,
             std::make_shared<qemu::PipeConnectionCreator>(gl_server->renderer(), rt));
+
+    boost::asio::deadline_timer appmgr_start_timer(rt->service());
 
     auto bridge_connector = std::make_shared<network::PublishedSocketConnector>(
         utils::string_format("%s/anbox_bridge", socket_path), rt,
@@ -203,17 +233,24 @@ anbox::cmds::SessionManager::SessionManager(const BusFactory &bus_factory)
               android_api_stub->set_rpc_channel(rpc_channel);
 
               auto server = std::make_shared<bridge::PlatformApiSkeleton>(
-                  pending_calls, policy, window_manager, app_db);
+                  pending_calls, platform, window_manager, app_db);
               server->register_boot_finished_handler([&]() {
                 DEBUG("Android successfully booted");
                 android_api_stub->ready().set(true);
+                appmgr_start_timer.expires_from_now(default_appmgr_startup_delay);
+                appmgr_start_timer.async_wait([&](const boost::system::error_code &err) {
+                  if (err != boost::system::errc::success)
+                    return;
+                  launch_appmgr_if_needed(android_api_stub);
+                });
               });
               return std::make_shared<bridge::PlatformMessageProcessor>(
                   sender, server, pending_calls);
             }));
 
     container::Configuration container_configuration;
-    container_configuration.bind_mounts = {
+    if (!standalone_) {
+      container_configuration.bind_mounts = {
         {qemu_pipe_connector->socket_file(), "/dev/qemu_pipe"},
         {bridge_connector->socket_file(), "/dev/anbox_bridge"},
         {audio_server->socket_file(), "/dev/anbox_audio"},
@@ -221,11 +258,16 @@ anbox::cmds::SessionManager::SessionManager(const BusFactory &bus_factory)
         {"/dev/binder", "/dev/binder"},
         {"/dev/ashmem", "/dev/ashmem"},
         {"/dev/fuse", "/dev/fuse"},
-    };
+      };
 
-    dispatcher->dispatch([&]() { container.start(container_configuration); });
+      dispatcher->dispatch([&]() { container_->start(container_configuration); });
+    }
 
-    auto bus = bus_factory_();
+    auto bus_type = core::dbus::WellKnownBus::session;
+    if (use_system_dbus_)
+        bus_type = core::dbus::WellKnownBus::system;
+
+    auto bus = std::make_shared<core::dbus::Bus>(bus_type);
     bus->install_executor(core::dbus::asio::make_executor(bus, rt->service()));
 
     auto skeleton = anbox::dbus::skeleton::Service::create_for_bus(bus, app_manager);
@@ -233,9 +275,11 @@ anbox::cmds::SessionManager::SessionManager(const BusFactory &bus_factory)
     rt->start();
     trap->run();
 
-    // Stop the container which should close all open connections we have on
-    // our side and should terminate all services.
-    container.stop();
+    if (!standalone_) {
+      // Stop the container which should close all open connections we have on
+      // our side and should terminate all services.
+      container_->stop();
+    }
 
     rt->stop();
 

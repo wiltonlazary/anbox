@@ -1,18 +1,23 @@
+[![Snap Status](https://build.snapcraft.io/badge/anbox/anbox.svg)](https://build.snapcraft.io/user/anbox/anbox)
+[![Build Status](https://travis-ci.org/anbox/anbox.svg?branch=master)](https://travis-ci.org/anbox/anbox)
+
 # Anbox
 
-Anbox is container based approach to boot a full Android system on a
-regular GNU Linux system like Ubuntu.
+Anbox is a container-based approach to boot a full Android system on a
+regular GNU/Linux system like Ubuntu. In other words: Anbox will let
+you run Android on your Linux system without the slowness of
+virtualization.
 
 ## Overview
 
 Anbox uses Linux namespaces (user, pid, uts, net, mount, ipc) to run a
 full Android system in a container and provide Android applications on
-any GNU Linux based platform.
+any GNU/Linux-based platform.
 
 The Android inside the container has no direct access to any hardware.
 All hardware access is going through the anbox daemon on the host. We're
-reusing what Android implemented within the QEMU based emulator for Open
-GL ES accelerated rendering. The Android system inside the container uses
+reusing what Android implemented within the QEMU-based emulator for OpenGL
+ES accelerated rendering. The Android system inside the container uses
 different pipes to communicate with the host system and sends all hardware
 access commands through these.
 
@@ -95,6 +100,8 @@ Untested but likely to work:
 
 ## Build from source
 
+### Requirements
+
 To build the Anbox runtime itself there is nothing special to know. We're using
 cmake as build system. A few build dependencies need to be present on your host
 system:
@@ -128,13 +135,19 @@ $ sudo apt install build-essential cmake cmake-data debhelper dbus google-mock \
     libboost-program-options-dev libboost-system-dev libboost-test-dev \
     libboost-thread-dev libcap-dev libdbus-1-dev libdbus-cpp-dev libegl1-mesa-dev \
     libgles2-mesa-dev libglib2.0-dev libglm-dev libgtest-dev liblxc1 \
-    libproperties-cpp-dev libprotobuf-dev libsdl2-dev lxc-dev pkg-config \
-    protobuf-compiler
+    libproperties-cpp-dev libprotobuf-dev libsdl2-dev libsdl2-image-dev lxc-dev \
+    pkg-config protobuf-compiler 
 ```
+We recommend Ubuntu 16.04 (xenial) with **GCC 5.x** as your build environment.
+
+
+### Build
 
 Afterwards you can build Anbox with
 
 ```
+$ git clone https://github.com/anbox/anbox.git
+$ cd anbox
 $ mkdir build
 $ cd build
 $ cmake ..
@@ -144,7 +157,7 @@ $ make
 A simple
 
 ```
-$ make install
+$ sudo make install
 ```
 
 will install the necessary bits into your system.
@@ -170,7 +183,7 @@ Running Anbox from a local build requires a few more things you need to know
 about. Please have a look at the ["Runtime Setup"](docs/runtime-setup.md)
 documentation.
 
-## documentation
+## Documentation
 
 You will find additional documentation for Anbox in the *docs* subdirectory
 of the project source.
@@ -179,6 +192,7 @@ Interesting things to have a look at
 
  * [Runtime Setup](docs/runtime-setup.md)
  * [Build Android image](docs/build-android.md)
+ * [Generate Android emugl source](docs/generate-emugl-source.md)
 
 ## Reporting bugs
 
@@ -187,7 +201,7 @@ If you have found an issue with Anbox, please [file a bug](https://github.com/an
 ## Get in Touch
 
 If you want to get in contact with the developers please feel free to join the
-*#anbox* IRC channel on [FreeNode](https://freenode.net/).
+*#anbox* IRC channel on [Freenode](https://freenode.net/).
 
 ## Copyright and Licensing
 
@@ -195,5 +209,5 @@ Anbox reuses code from other projects like the Android QEMU emulator. These
 projects are available in the external/ subdirectory with the licensing terms
 included.
 
-The anbox source itself, if not stated differently in the relevant source files,
+The Anbox source itself, if not stated differently in the relevant source files,
 is licensed under the terms of the GPLv3 license.

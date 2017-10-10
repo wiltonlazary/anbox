@@ -16,29 +16,37 @@
  */
 
 #include "anbox/qemu/adb_message_processor.h"
-#include "anbox/logger.h"
 #include "anbox/network/delegate_connection_creator.h"
 #include "anbox/network/delegate_message_processor.h"
 #include "anbox/network/tcp_socket_messenger.h"
+#include "anbox/utils.h"
 
 #include <fstream>
 #include <functional>
 
 namespace {
 const unsigned short default_adb_client_port{5037};
-const unsigned short default_host_listen_port{6664};
+// For the listening port we have to use an odd port in the 5555-5585 range so
+// the host can find us on start. See
+// https://developer.android.com/studio/command-line/adb.html.
+const unsigned short default_host_listen_port{5559};
+constexpr const char *loopback_address{"127.0.0.1"};
 const std::string accept_command{"accept"};
 const std::string ok_command{"ok"};
 const std::string ko_command{"ko"};
 const std::string start_command{"start"};
+// This timeount should be too high to not cause a too long wait time for the
+// user until we connect to the adb host instance after it appeared and not
+// too short to not put unnecessary burden on the CPU.
 const boost::posix_time::seconds default_adb_wait_time{1};
-static std::mutex active_instance;
 }
 
 using namespace std::placeholders;
 
 namespace anbox {
 namespace qemu {
+std::mutex AdbMessageProcessor::active_instance_{};
+
 AdbMessageProcessor::AdbMessageProcessor(
     const std::shared_ptr<Runtime> &rt,
     const std::shared_ptr<network::SocketMessenger> &messenger)
@@ -46,12 +54,13 @@ AdbMessageProcessor::AdbMessageProcessor(
       state_(waiting_for_guest_accept_command),
       expected_command_(accept_command),
       messenger_(messenger),
-      host_notify_timer_(rt->service()) {}
+      lock_(active_instance_, std::defer_lock) {
+}
 
 AdbMessageProcessor::~AdbMessageProcessor() {
   state_ = closed_by_host;
+
   host_connector_.reset();
-  active_instance.unlock();
 }
 
 void AdbMessageProcessor::advance_state() {
@@ -61,7 +70,7 @@ void AdbMessageProcessor::advance_state() {
       // running we don't have to do anything here until that one is done.
       // The container directly starts a second connection once the first
       // one is established but will not use it until the active one is closed.
-      active_instance.lock();
+      lock_.lock();
 
       if (state_ == closed_by_host) {
         host_connector_.reset();
@@ -100,9 +109,12 @@ void AdbMessageProcessor::advance_state() {
 }
 
 void AdbMessageProcessor::wait_for_host_connection() {
+  if (state_ != waiting_for_guest_accept_command)
+    return;
+
   if (!host_connector_) {
     host_connector_ = std::make_shared<network::TcpSocketConnector>(
-        boost::asio::ip::address_v4::from_string("127.0.0.1"),
+        boost::asio::ip::address_v4::from_string(loopback_address),
         default_host_listen_port, runtime_,
         std::make_shared<
             network::DelegateConnectionCreator<boost::asio::ip::tcp>>(
@@ -113,18 +125,12 @@ void AdbMessageProcessor::wait_for_host_connection() {
     // Notify the adb host instance so that it knows on which port our
     // proxy is waiting for incoming connections.
     auto messenger = std::make_shared<network::TcpSocketMessenger>(
-        boost::asio::ip::address_v4::from_string("127.0.0.1"),
-        default_adb_client_port, runtime_);
-    auto message =
-        utils::string_format("host:emulator:%d", default_host_listen_port);
-    auto handshake =
-        utils::string_format("%04x%s", message.size(), message.c_str());
+        boost::asio::ip::address_v4::from_string(loopback_address), default_adb_client_port, runtime_);
+    auto message = utils::string_format("host:emulator:%d", default_host_listen_port);
+    auto handshake = utils::string_format("%04x%s", message.size(), message.c_str());
     messenger->send(handshake.data(), handshake.size());
-  } catch (std::exception &) {
-    // Try again later when the host adb service is maybe available
-    host_notify_timer_.expires_from_now(default_adb_wait_time);
-    host_notify_timer_.async_wait(
-        [&](const boost::system::error_code &) { wait_for_host_connection(); });
+  } catch (...) {
+    // Server not up. No problem, it will contact us when started.
   }
 }
 
@@ -148,15 +154,28 @@ void AdbMessageProcessor::on_host_connection(std::shared_ptr<boost::asio::basic_
 
 void AdbMessageProcessor::read_next_host_message() {
   auto callback = std::bind(&AdbMessageProcessor::on_host_read_size, this, _1, _2);
-  host_messenger_->async_receive_msg(callback,
-                                     boost::asio::buffer(host_buffer_));
+  host_messenger_->async_receive_msg(callback, boost::asio::buffer(host_buffer_));
 }
 
-void AdbMessageProcessor::on_host_read_size(
-    const boost::system::error_code &error, std::size_t bytes_read) {
+void AdbMessageProcessor::on_host_read_size(const boost::system::error_code &error, std::size_t bytes_read) {
   if (error) {
+    // When AdbMessageProcessor is destroyed on program termination, the sockets
+    // are closed and the standing operations are canceled. But, the callback is
+    // still called even in that case, and the object has already been
+    // deleted. We detect that condition by looking at the error code and avoid
+    // touching *this in that case.
+    if (error == boost::system::errc::operation_canceled)
+      return;
+
+    // For other errors, we assume the connection with the host is dropped. We
+    // close the connection to the container's adbd, which will trigger the
+    // deletion of this AdbMessageProcessor instance and free resources (most
+    // importantly, default_host_listen_port and the lock). The standing
+    // connection that adbd opened can then proceed and wait for the host to be
+    // up again.
     state_ = closed_by_host;
-    BOOST_THROW_EXCEPTION(std::runtime_error(error.message()));
+    messenger_->close();
+    return;
   }
 
   messenger_->send(reinterpret_cast<const char *>(host_buffer_.data()), bytes_read);

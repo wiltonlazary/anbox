@@ -7,6 +7,8 @@ include_directories(
   ${DBUS_CPP_INCLUDE_DIRS}
   ${DBUS_INCLUDE_DIRS}
   ${SDL2_INCLUDE_DIRS}
+  ${SDL2_IMAGE_INCLUDE_DIRS}
+  ${PROPERTIES_CPP_INCLUDE_DIRS}
   ${LXC_INCLUDE_DIRS}
   ${MIRCLIENT_INCLUDE_DIRS}
   ${CMAKE_CURRENT_BINARY_DIR}
@@ -16,6 +18,7 @@ include_directories(
   ${CMAKE_SOURCE_DIR}/external/process-cpp-minimal/include
   ${CMAKE_SOURCE_DIR}/external/android-emugl/shared
   ${CMAKE_SOURCE_DIR}/external/android-emugl/host/include
+  ${CMAKE_BINARY_DIR}/external/android-emugl/host/include
   ${CMAKE_SOURCE_DIR}/external/android-emugl/shared/OpenglCodecCommon
   ${CMAKE_SOURCE_DIR}/external/android-emugl/host/libs
   ${CMAKE_SOURCE_DIR}/external/android-emugl/host/include/libOpenglRender
@@ -41,6 +44,7 @@ protobuf_generate_cpp(
 
 
 add_library(anbox-protobuf
+    STATIC
     ${GENERATED_PROTOBUF_BRIDGE_SRCS}
     ${GENERATED_PROTOBUF_BRIDGE_HDRS}
     ${GENERATED_PROTOBUF_RPC_SRCS}
@@ -56,12 +60,14 @@ set(SOURCES
     anbox/utils.cpp
     anbox/cli.cpp
     anbox/runtime.cpp
-    anbox/version.cpp
     anbox/daemon.cpp
-    anbox/config.cpp
+    anbox/system_configuration.cpp
     anbox/not_reachable.cpp
 
+    anbox/build/config.h.in
+
     anbox/android/intent.cpp
+    anbox/android/ip_config_builder.cpp
 
     anbox/common/fd.cpp
     anbox/common/fd_sets.h
@@ -75,6 +81,7 @@ set(SOURCES
     anbox/common/loop_device.cpp
     anbox/common/loop_device_allocator.cpp
     anbox/common/mount_entry.cpp
+    anbox/common/binary_writer.cpp
 
     anbox/testing/gtest_utils.h
 
@@ -157,8 +164,15 @@ set(SOURCES
     anbox/wm/window_state.cpp
     anbox/wm/window.cpp
 
-    anbox/platform/policy.cpp
-    anbox/platform/default_policy.cpp
+    anbox/platform/base_platform.cpp
+
+    anbox/platform/null/platform.cpp
+
+    anbox/platform/sdl/sdl_wrapper.h
+    anbox/platform/sdl/window.cpp
+    anbox/platform/sdl/keycode_converter.cpp
+    anbox/platform/sdl/platform.cpp
+    anbox/platform/sdl/audio_sink.cpp
 
     anbox/input/manager.cpp
     anbox/input/device.cpp
@@ -180,11 +194,6 @@ set(SOURCES
     anbox/bridge/platform_api_skeleton.cpp
     anbox/bridge/android_api_stub.cpp
 
-    anbox/ubuntu/window.cpp
-    anbox/ubuntu/keycode_converter.cpp
-    anbox/ubuntu/platform_policy.cpp
-    anbox/ubuntu/audio_sink.cpp
-
     anbox/dbus/interface.h
     anbox/dbus/codecs.h
     anbox/dbus/skeleton/service.cpp
@@ -203,11 +212,13 @@ set(SOURCES
 
     anbox/utils/environment_file.cpp
 
+    anbox/ui/splash_screen.cpp
+
     anbox/do_not_copy_or_move.h
     anbox/optional.h
     anbox/defer_action.h)
 
-add_library(anbox-core ${SOURCES})
+add_library(anbox-core STATIC ${SOURCES})
 target_link_libraries(anbox-core
   ${Boost_LDFLAGS}
   ${Boost_LIBRARIES}
@@ -215,6 +226,8 @@ target_link_libraries(anbox-core
   ${DBUS_CPP_LIBRARIES}
   ${SDL2_LDFLAGS}
   ${SDL2_LIBRARIES}
+  ${SDL2_IMAGE_LDFLAGS}
+  ${SDL2_IMAGE_LIBRARIES}
   ${LXC_LDFLAGS}
   ${LXC_LIBRARIES}
   ${MIRCLIENT_LDFLAGS}
