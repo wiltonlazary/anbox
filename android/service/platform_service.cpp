@@ -49,6 +49,7 @@ anbox::PlatformApiStub::WindowStateUpdate::Window PlatformService::unpack_window
     auto frame_bottom = data.readInt32();
     auto task_id = data.readInt32();
     auto stack_id = data.readInt32();
+    auto rotation_angle = data.readInt32();
 
     return anbox::PlatformApiStub::WindowStateUpdate::Window{
         -1, // Display id will be added by the caller
@@ -117,7 +118,14 @@ status_t PlatformService::update_application_list(const Parcel &data) {
 
         data.readByteVector(&p.icon);
 
-        update.applications.push_back(p);
+        // Send updates with icons separately to not overflow protobuf
+        if (p.icon.size() > 0) {
+          anbox::PlatformApiStub::ApplicationListUpdate with_icon_update;
+          with_icon_update.applications.push_back(p);
+          platform_api_stub_->update_application_list(with_icon_update);
+        } else {
+          update.applications.push_back(p);
+        }
     }
 
     const auto num_removed_packages = data.readInt32();
